@@ -1,0 +1,25 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Outputs / artifacts
+logs/
+tinyllama-json/
+tinyllama-merged/
+
+# IDE
+.idea/
+
+# Claude / agents
+.claude/
+.agents/
+!.agents/skills/
+!.agents/skills/board-new-plan-creator/
+!.agents/skills/board-task-executor/
+
+# Test data
+test_dataset.jsonl
+corrupt_dataset.jsonl
+dataset.jsonl

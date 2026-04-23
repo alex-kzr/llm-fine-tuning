@@ -1,0 +1,484 @@
+<role>
+    Senior AI/ML Engineer and System Architect
+</role>
+<task>
+    Design and implement a complete application for fine-tuning a small LLM (1B–3B parameters) using LoRA, based on the provided educational material.
+
+    CONTEXT:
+    The goal is to build a practical system that:
+    - Takes a pre-trained small LLM (e.g., TinyLlama 1.1B)
+    - Fine-tunes it for a specific behavior (strict JSON output)
+    - Runs locally (Mac M1/M2/M3, GPU, or CPU)
+    - Demonstrates understanding of training parameters and quality control
+
+    Fine-tuning is NOT training from scratch. It is adapting an existing model’s behavior.
+
+    The target behavior:
+    The model must ALWAYS return responses in strict JSON format like:
+
+    {
+      "model": "tinyllama",
+      "type": "response",
+      "message": "..."
+    }
+
+    No extra text, no deviations.
+
+    ---
+
+    FUNCTIONAL REQUIREMENTS:
+
+    1. DATASET GENERATION MODULE
+    - Generate synthetic dataset in JSONL format
+    - Each sample must follow structure:
+
+    "text": "### Instruction: ... ### Input: ... ### Response: {JSON}"
+
+    - Include math and general knowledge examples
+    - Dataset size: configurable (default 300–1000)
+    - Save to dataset.jsonl
+
+    Dataset generator code:
+    import random
+    import json
+
+    MODEL_NAME = "tinyllama"
+
+    INSTRUCTIONS = [
+        "Ответь строго в JSON формате",
+        "Верни только JSON объект",
+    ]
+
+    math_templates = [
+        "Сколько будет {a}+{b}?",
+        "Чему равно {a} * {b}?"
+    ]
+
+    generic_answers = [
+        "Это базовое объяснение",
+        "Это известный факт"
+    ]
+
+    def generate_sample():
+        a, b = random.randint(1, 50), random.randint(1, 50)
+
+        question = f"Сколько будет {a}+{b}?"
+        answer = f"{a}+{b} равно {a+b}"
+
+        response_json = {
+            "model": MODEL_NAME,
+            "type": "response",
+            "message": answer
+        }
+
+        text = f"""### Instruction:
+    {random.choice(INSTRUCTIONS)}
+
+    ### Input:
+    {question}
+
+    ### Response:
+    {json.dumps(response_json, ensure_ascii=False)}
+    """
+
+        return {"text": text}
+
+
+    def generate_dataset(n=300):
+        return [generate_sample() for _ in range(n)]
+
+
+    def save(dataset):
+        with open("dataset.jsonl", "w") as f:
+            for item in dataset:
+                f.write(json.dumps(item) + "\n")
+
+
+    if __name__ == "__main__":
+        data = generate_dataset(300)
+        save(data)
+
+
+    ---
+
+    2. TRAINING MODULE
+    - Use HuggingFace Transformers + PEFT (LoRA)
+    - Base model:
+      TinyLlama/TinyLlama-1.1B-Chat-v1.0
+
+    - Apply LoRA with:
+      - r=8
+      - lora_alpha=16
+      - target_modules=["q_proj", "v_proj"]
+      - dropout=0.05
+
+    - Training config:
+      - batch_size:
+          Mac: 1
+          GPU: configurable
+      - gradient_accumulation_steps (default 4)
+      - epochs: 2
+      - learning_rate: 2e-4
+      - max_length: 512
+
+    - Output:
+      - Save adapter to ./tinyllama-json
+
+    Training code:
+    from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer
+    from peft import LoraConfig, get_peft_model
+    from datasets import load_dataset
+
+    model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+    # ==== tokenizer ====
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    # ==== model ====
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        device_map="auto"
+    )
+
+    model.config.use_cache = False
+
+    # ==== LoRA ====
+
+    lora_config = LoraConfig(
+        r=8,
+        lora_alpha=16,
+        target_modules=["q_proj", "v_proj"],
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM"
+    )
+
+    model = get_peft_model(model, lora_config)
+
+    # ==== dataset ====
+
+    dataset = load_dataset("json", data_files="dataset.jsonl")["train"]
+
+    def tokenize(example):
+        tokens = tokenizer(
+            example["text"],
+            truncation=True,
+            padding="max_length",
+            max_length=512
+        )
+
+        tokens["labels"] = tokens["input_ids"].copy()
+        return tokens
+
+    dataset = dataset.map(tokenize, remove_columns=["text"])
+
+    # ==== training ====
+
+    training_args = TrainingArguments(
+        output_dir="./tinyllama-json",
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=4,
+        num_train_epochs=2,
+        learning_rate=2e-4,
+        logging_steps=10,
+        save_strategy="epoch",
+        report_to="none",
+        fp16=False
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=dataset
+    )
+
+    trainer.train()
+
+    model.save_pretrained("./tinyllama-json")
+    tokenizer.save_pretrained("./tinyllama-json")
+
+    ---
+
+    3. INFERENCE / TESTING MODULE
+    - Load base model + LoRA adapter
+    - Generate responses for test prompts
+    - Extract JSON from model output using regex
+    - Validate JSON correctness
+
+    - Implement stress test:
+      - 10+ diverse questions
+      - Measure:
+        - valid JSON count
+        - accuracy %
+
+    Testing code:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import PeftModel
+    import torch
+    import json
+    import re
+
+    # ==== CONFIG ====
+
+    BASE_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    ADAPTER_PATH = "./tinyllama-json"
+
+    QUESTIONS = [
+        "Что такое интернет?",
+        "Как работает компьютер?",
+        "Кто такой Илон Маск?",
+        "Объясни гравитацию",
+        "Что такое нейросеть?",
+        "Как работает алгоритм сортировки?",
+        "Почему небо голубое?",
+        "Что такое программирование?",
+        "Как устроен CPU?",
+        "Объясни искусственный интеллект"
+    ]
+
+    # ==== LOAD MODEL ====
+
+    print("Loading model...")
+
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    base_model = AutoModelForCausalLM.from_pretrained(
+        BASE_MODEL,
+        device_map="auto"
+    )
+
+    model = PeftModel.from_pretrained(base_model, ADAPTER_PATH)
+    model.eval()
+
+    print("Model loaded ✔")
+
+    # ==== JSON EXTRACTOR ====
+
+    def extract_json(text):
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            return None
+        try:
+            return json.loads(match.group())
+        except:
+            return None
+
+    # ==== GENERATION ====
+
+    def generate(prompt):
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+
+        output = model.generate(
+            **inputs,
+            max_new_tokens=150,
+            temperature=0.7,
+            do_sample=True,
+            top_p=0.9
+        )
+
+        return tokenizer.decode(output[0], skip_special_tokens=True)
+
+    # ==== STRESS TEST ====
+
+    valid_json = 0
+    total = len(QUESTIONS)
+
+    print("\n===== STRESS TEST START =====\n")
+
+    for i, q in enumerate(QUESTIONS, 1):
+
+        prompt = f"""### Instruction:
+    Ответь строго в JSON формате
+
+    ### Input:
+    {q}
+
+    ### Response:
+    """
+
+        result = generate(prompt)
+        parsed = extract_json(result)
+
+        print(f"Q{i}: {q}")
+        print("RAW OUTPUT:")
+        print(result)
+
+        if parsed:
+            print("JSON VALID ✔")
+            valid_json += 1
+        else:
+            print("JSON INVALID ❌")
+
+        print("-" * 60)
+
+    # ==== RESULTS ====
+
+    print("\n===== FINAL RESULT =====")
+    print(f"Valid JSON: {valid_json}/{total}")
+    print(f"Accuracy: {valid_json / total * 100:.2f}%")
+
+
+
+    Build final model code:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import PeftModel
+
+    base_model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    adapter_path = "./tinyllama-json"
+    output_path = "./tinyllama-merged"
+
+    print("Loading base model...")
+
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base_model_name,
+        device_map="auto"
+    )
+
+    print("Loading LoRA adapter...")
+
+    model = PeftModel.from_pretrained(base_model, adapter_path)
+
+    print("Merging weights...")
+
+    merged_model = model.merge_and_unload()
+
+    print("Saving merged model...")
+
+    merged_model.save_pretrained(output_path)
+    tokenizer.save_pretrained(output_path)
+
+    print("DONE ✔ Model saved to:", output_path)
+
+
+
+    ---
+
+    4. MODEL MERGING MODULE
+    - Merge LoRA adapter into base model
+    - Save final merged model
+
+    ---
+
+    5. CONFIGURATION SYSTEM
+    - Central config file (config.py or .env)
+    - Parameters:
+      - model name
+      - batch size
+      - epochs
+      - dataset size
+      - device (cpu / mps / cuda)
+
+    ---
+
+    6. CLI INTERFACE
+    Provide commands:
+
+    - generate-dataset
+    - train
+    - test
+    - merge
+
+    Example:
+    python main.py train
+
+    ---
+
+    7. HARDWARE SUPPORT
+    The system must support:
+    - Mac (MPS)
+    - NVIDIA GPU (CUDA)
+    - CPU (fallback)
+
+    ---
+
+    NON-FUNCTIONAL REQUIREMENTS:
+
+    - Modular architecture:
+      - dataset/
+      - training/
+      - inference/
+      - utils/
+
+    - Clean separation of responsibilities
+    - No hardcoded values
+    - Logs for:
+      - training progress
+      - loss values
+      - evaluation results
+
+    ---
+
+    QUALITY CRITERIA:
+
+    Training is considered successful if:
+    - Loss decreases (e.g., 1.5 → 0.7)
+    - JSON output is stable
+    - At least 80% valid JSON in stress test
+
+    ---
+
+    STOP CONDITIONS:
+
+    Stop training if:
+    - Loss stops decreasing
+    - Model starts repeating outputs
+    - JSON format is already stable
+
+    ---
+
+    KEY INSIGHT:
+
+    Fine-tuning success depends on:
+    - Dataset quality
+    - Proper formatting
+    - Correct hyperparameters
+
+    NOT on:
+    - Increasing epochs blindly
+
+    ---
+
+    DELIVERABLES:
+
+    The agent must produce:
+    1. Full project structure
+    2. Working code for all modules
+    3. Example dataset
+    4. Training script
+    5. Testing script
+    6. Instructions to run locally
+
+    ---
+
+    REFERENCE MATERIAL:
+
+    This implementation is based on:
+    - LoRA fine-tuning approach
+    - TinyLlama model
+    - JSON-format conditioning task :contentReference[oaicite:0]{index=0}
+
+    ---
+
+    OUTPUT FORMAT:
+
+    Return:
+    - Project structure
+    - All source code
+    - Run instructions
+
+    DO NOT:
+    - Skip modules
+    - Simplify architecture
+    - Return pseudo-code
+
+    Build a REAL working system.
+
+</task>
+<output>
+    Create plan and tasks for the project
+</output>
